@@ -34,18 +34,13 @@ DEFAULT_CONFIG = {
     "cmd": "card-authenticate-unlock",
     "item_id": 32,
     "business_id": 19,
-
-    # NEW: server selection
-    # server_env: "dev" or "live"
-    "server_env": "dev",
-
-    # You can override these per-device if needed; otherwise they’re derived from server_env.
-    "server_host": "",
-    "server_path": "/slb-app/api.php",
 }
-
 CONFIG_PATH = os.environ.get("NFC_CFG", str(Path.home() / ".config/nfc-scanner/config.json"))
 LOG_PATH    = os.environ.get("NFC_LOG", str(Path.home() / ".config/nfc-scanner/events.log"))
+
+SERVER_HOST = "app-salto-bookmy.remote.beetleblack.com.au"
+SERVER_PATH = "/slb-app/api.php"
+SERVER_URL  = f"https://{SERVER_HOST}{SERVER_PATH}"
 
 # HTTPS timeouts
 HTTP_CONNECT_TIMEOUT = float(os.getenv("HTTP_CONNECT_TIMEOUT", "5.0"))
@@ -114,51 +109,8 @@ def ensure_config():
     except Exception as e:
         log_line(f"[CFG] env lat/lng override error: {e}")
 
-    # allow env override for server env/host/path
-    env_env = os.getenv("NFC_SERVER_ENV")
-    if env_env:
-        cfg["server_env"] = env_env
-
-    env_host = os.getenv("NFC_SERVER_HOST")
-    if env_host:
-        cfg["server_host"] = env_host
-
-    env_path = os.getenv("NFC_SERVER_PATH")
-    if env_path:
-        cfg["server_path"] = env_path
-
-    log_line(
-        f"[CFG] lat={cfg['lat']} lng={cfg['lng']} cmd={cfg['cmd']} "
-        f"item_id={cfg['item_id']} business_id={cfg['business_id']} "
-        f"server_env={cfg.get('server_env')} server_host={cfg.get('server_host')} server_path={cfg.get('server_path')}"
-    )
+    log_line(f"[CFG] lat={cfg['lat']} lng={cfg['lng']} cmd={cfg['cmd']} item_id={cfg['item_id']} business_id={cfg['business_id']}")
     return cfg
-
-def resolve_server_url(cfg: dict) -> str:
-    """
-    Decide which server URL to use based on config + env.
-    Priority:
-      1. NFC_SERVER_HOST / NFC_SERVER_PATH env vars (handled in ensure_config).
-      2. cfg['server_host'] / cfg['server_path'] if set.
-      3. server_env: 'dev' -> dev host, 'live' -> live host.
-    """
-    env = str(cfg.get("server_env", "dev")).strip().lower()
-
-    # Default hosts based on env
-    if env == "live":
-        default_host = "app.slbp.smartlockbooking.com.au"
-    else:
-        # dev / anything else
-        default_host = "app-salto-bookmy.remote.beetleblack.com.au"
-
-    host = str(cfg.get("server_host") or "").strip() or default_host
-    path = str(cfg.get("server_path") or "/slb-app/api.php").strip() or "/slb-app/api.php"
-    if not path.startswith("/"):
-        path = "/" + path
-
-    url = f"https://{host}{path}"
-    log_line(f"[CFG] resolved server URL: env={env} host={host} path={path} url={url}")
-    return url
 
 def safe_preview_json(doc: dict) -> str:
     if os.getenv("LOG_TX_FULL", "0") not in ("1","true","yes","on"):
@@ -198,10 +150,9 @@ def _split_httpstatus(resp: str):
     except Exception: code = 0
     return body, code
 
-def send_http(payload: dict, req_id: int, server_url: str) -> tuple[bool, int, str, str]:
+def send_http(payload: dict, req_id: int) -> tuple[bool, int, str, str]:
     """
     Returns (ok, status_code, body_snip, transport).
-    server_url is resolved per-device (dev/live) before calling.
     """
     if SEND_DRY:
         log_line(f"[HTTP#{req_id}] DRY RUN — not sending. payload={safe_preview_json(payload)}")
@@ -210,7 +161,7 @@ def send_http(payload: dict, req_id: int, server_url: str) -> tuple[bool, int, s
     js  = json.dumps(payload, separators=(",",":"))
     b64 = base64.b64encode(js.encode()).decode()
     preview = safe_preview_json(payload)
-    log_line(f"[HTTP#{req_id}] PREP url={server_url} json_len={len(js)} b64_len={len(b64)} payload={preview}")
+    log_line(f"[HTTP#{req_id}] PREP url={SERVER_URL} json_len={len(js)} b64_len={len(b64)} payload={preview}")
 
     curl = shutil.which("curl")
     if curl:
@@ -221,14 +172,10 @@ def send_http(payload: dict, req_id: int, server_url: str) -> tuple[bool, int, s
             "-m", f"{HTTP_TOTAL_TIMEOUT:.2f}",
             "-w", "HTTPSTATUS:%{http_code}",
             "-F", f"b64={b64}",
-            server_url
+            SERVER_URL
         ]
         log_line(f"[HTTP#{req_id}] REQ START (curl multipart)")
-        log_line(
-            f"[HTTP#{req_id}] CMD: {curl} -sS --fail-with-body -A PiVideoRFID/1.0 "
-            f"--connect-timeout {HTTP_CONNECT_TIMEOUT:.2f} -m {HTTP_TOTAL_TIMEOUT:.2f} "
-            f"-w HTTPSTATUS:%{{http_code}} -F b64=<omitted> {server_url}"
-        )
+        log_line(f"[HTTP#{req_id}] CMD: {curl} -sS --fail-with-body -A PiVideoRFID/1.0 --connect-timeout {HTTP_CONNECT_TIMEOUT:.2f} -m {HTTP_TOTAL_TIMEOUT:.2f} -w HTTPSTATUS:%{{http_code}} -F b64=<omitted> {SERVER_URL}")
         t0=time.monotonic()
         try:
             out = subprocess.run(cmd, capture_output=True, text=True, timeout=HTTP_TOTAL_TIMEOUT+0.3)
@@ -252,7 +199,7 @@ def send_http(payload: dict, req_id: int, server_url: str) -> tuple[bool, int, s
             "-m", f"{HTTP_TOTAL_TIMEOUT:.2f}",
             "-w", "HTTPSTATUS:%{http_code}",
             "--data-urlencode", f"b64={b64}",
-            server_url
+            SERVER_URL
         ]
         log_line(f"[HTTP#{req_id}] RETRY (curl form)")
         t1=time.monotonic()
@@ -280,21 +227,15 @@ def send_http(payload: dict, req_id: int, server_url: str) -> tuple[bool, int, s
         from urllib3.util.retry import Retry
         s = requests.Session()
         s.headers.update({"User-Agent":"PiVideoRFID/1.0","Accept":"application/json"})
-        retry = Retry(
-            total=1,
-            backoff_factor=0.2,
-            status_forcelist=(429,500,502,503,504),
-            allowed_methods=frozenset(["POST"]),
-            raise_on_status=False,
-            respect_retry_after_header=True,
-        )
+        retry = Retry(total=1, backoff_factor=0.2, status_forcelist=(429,500,502,503,504),
+                      allowed_methods=frozenset(["POST"]), raise_on_status=False, respect_retry_after_header=True)
         s.mount("https://", HTTPAdapter(pool_connections=1, pool_maxsize=1, max_retries=retry))
 
         t2=time.monotonic()
-        r = s.post(server_url, files={"b64": (None, b64)}, timeout=(HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT), verify=True)
+        r = s.post(SERVER_URL, files={"b64": (None, b64)}, timeout=(HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT), verify=True)
         if r.ok and ("POST Failed" in (r.text or "")):
             log_line(f"[HTTP#{req_id}] switching to form (requests)")
-            r = s.post(server_url, data={"b64": b64}, timeout=(HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT), verify=True)
+            r = s.post(SERVER_URL, data={"b64": b64}, timeout=(HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT), verify=True)
 
         status = getattr(r, "status_code", 0)
         body   = getattr(r, "text", "") or ""
@@ -398,7 +339,6 @@ def run():
     rfid = PiicoDev_RFID()
     buzz = PiicoDev_Buzzer()
     cfg  = ensure_config()
-    server_url = resolve_server_url(cfg)
 
     vp   = VideoPlayer(device, width=240, height=280, fps=fps, bgr=bgr)
     log_line("[APP] ready — entering idle")
@@ -444,19 +384,19 @@ def run():
             }
             log_line(f"[SCAN#{scan_no}] HTTP about to send… (watch for [HTTP#{scan_no}] PREP)")
 
-            ok, status, body_snip, transport = send_http(payload, scan_no, server_url)
+            ok, status, body_snip, transport = send_http(payload, scan_no)
             log_line(f"[HTTP#{scan_no}] FINAL transport={transport} ok={ok} status={status} body_snip={body_snip!r}")
 
             if ok:
                 beep_ok(buzz)
                 log_line(f"[SCAN#{scan_no}] UNLOCKED — playing success in full")
-                vp.stop()
+                vp.stop()                              # <— add this line
                 play_state(vp, "unlocked", loop=False)
-                vp.wait_done()
+                vp.wait_done()  
             else:
                 beep_fail(buzz)
                 log_line(f"[SCAN#{scan_no}] ERROR — playing error in full")
-                vp.stop()
+                vp.stop()                              # <— add this line
                 play_state(vp, "error", loop=False)
                 vp.wait_done()
 
